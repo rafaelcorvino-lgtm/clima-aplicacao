@@ -6,13 +6,16 @@ rem senhas em servicos externos.
 cd /d "%~dp0"
 setlocal EnableDelayedExpansion
 set REPO=rafaelcorvino-lgtm/clima-aplicacao
+gh auth status -h github.com >nul 2>nul
+if errorlevel 1 (
+  echo.
+  echo   O gh ainda nao esta logado. Vai abrir o navegador: copie o codigo mostrado,
+  echo   entre no GitHub e clique em Authorize.
+  echo.
+  gh auth login -h github.com -s repo,workflow -w
+)
 echo.
-echo   1/2  Autorizando o gh a publicar o robo (escopo "workflow").
-echo        Vai abrir o navegador: entre no GitHub e clique em Authorize.
-echo.
-gh auth refresh -h github.com -s workflow
-echo.
-echo   2/2  Enviando os segredos do repositorio...
+echo   Enviando os segredos do repositorio...
 echo.
 for %%N in (ZEUS_EMAIL ZEUS_SENHA APP_SENHA) do (
   set "VALOR="
