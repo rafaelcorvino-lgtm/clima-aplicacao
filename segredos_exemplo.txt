@@ -1,0 +1,9 @@
+# Copie este arquivo para  segredos.txt  (mesma pasta) e preencha.
+# segredos.txt esta no .gitignore e nunca sai do seu computador.
+
+# Acesso ao portal Zeus (portal.zeusagro.com). Vai so para o login da Zeus, por HTTPS.
+ZEUS_EMAIL=seu-email@exemplo.com
+ZEUS_SENHA=sua-senha
+
+# Opcional: senha para abrir a pagina no celular (vazio = pagina aberta na rede local).
+APP_SENHA=

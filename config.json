@@ -1,0 +1,32 @@
+{
+  "_comentario": "Limites do piloto. Margem = faixa que vira ATENCAO antes do limite. idade_max_min = leitura mais velha que isso nao vale.",
+  "limites": {
+    "temperatura_max": 30,
+    "vento_min": 3,
+    "vento_max": 15,
+    "umidade_min": 50,
+    "rajada_max": 20,
+    "rajada_reprova": false,
+    "delta_t_atencao": 8,
+    "delta_t_ruim": 10,
+    "delta_t_reprova": false,
+    "margem_temperatura": 2,
+    "margem_vento": 1.5,
+    "margem_umidade": 5,
+    "idade_max_min": 90
+  },
+  "_idade": "As estacoes Zeus fecham um quadro por hora; a leitura das 10:00 so chega perto das 10:10. Por isso 90 min.",
+  "atualizar_a_cada_min": 5,
+  "horas_de_previsao": 12,
+  "_fazendas": "Coordenadas vindas do mapa MariAgro. Uma estacao Zeus a menos de raio_km de uma fazenda e mostrada dentro dela.",
+  "raio_km": 40,
+  "fazendas": [
+    {"nome": "Faz. Larga Grande",       "lat": -16.349443, "lng": -47.547654},
+    {"nome": "Faz. Serra Bonita",       "lat": -15.842754, "lng": -46.706265},
+    {"nome": "Faz. Chapadão do Bugre",  "lat": -19.945259, "lng": -47.265017},
+    {"nome": "Faz. Divina",             "lat": -19.335630, "lng": -47.380258},
+    {"nome": "Faz. Três Marias",        "lat": -21.743258, "lng": -47.130156},
+    {"nome": "Faz. Santa Marta",        "lat": -16.615183, "lng": -43.342375},
+    {"nome": "Faz. Canaã",              "lat": -12.809889, "lng": -52.525964}
+  ]
+}

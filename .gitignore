@@ -1,0 +1,7 @@
+# nunca sobe: credenciais, sessao e dados locais
+segredos.txt
+.sessao-zeus.json
+historico.db
+__pycache__/
+*.pyc
+site/
