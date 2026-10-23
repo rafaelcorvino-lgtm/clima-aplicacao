@@ -4,6 +4,9 @@ name: Atualizar clima
 # atrasar a disparada agendada alguns minutos, por isso: varias disparadas por
 # hora, e o robo (--esperar-quadro) fica tentando a cada minuto nos primeiros
 # 25 min ate o quadro novo aparecer. As demais disparadas renovam a previsao.
+#
+# Obs.: o GitHub so agenda workflows do ramo padrao (main). Se o agendamento
+# parar de disparar, um push neste arquivo no main reregistra o cron.
 on:
   schedule:
     - cron: "2,6,11,17,30,45 * * * *"
