@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Robo da nuvem (GitHub Actions): monta o estado e publica cifrado no Pages.
 
-    python nuvem/atualizar.py --saida site [--esperar-quadro]
+    python nuvem/atualizar.py --saida site                      uma vez
+    python nuvem/atualizar.py --saida site --laco 350 --push    em laco, por 350 min
 
 Le ZEUS_EMAIL, ZEUS_SENHA e APP_SENHA do ambiente (segredos do GitHub).
 Na pasta --saida (o checkout do ramo gh-pages) escreve:
@@ -11,12 +12,18 @@ Na pasta --saida (o checkout do ramo gh-pages) escreve:
     historico.db.enc  o historico (SQLite) cifrado; e lido e reescrito a cada vez
     meta.json         so a hora da ultima atualizacao (sem dado sensivel)
 
---esperar-quadro: o mecanismo dos "primeiros minutos". A Zeus fecha um quadro
-por hora e ele chega por volta de hh:02. Se o robo rodou nos primeiros 25
-minutos da hora e o quadro novo ainda nao apareceu, ele tenta de novo a cada
-60 s (ate 15 vezes) e so publica quando o quadro da hora chegou -- assim a
-pagina mostra a hora nova minutos depois de fechada, mesmo que o GitHub
-atrase a disparada.
+POR QUE LACO: o agendamento (cron) do GitHub e pouco confiavel -- medido em
+23 a 25/10/2026, disparou ~7 vezes por dia em vez de 144. Entao uma execucao
+fica viva por quase 6 h (o maximo de um job) publicando a cada 10 min, e o
+cron so serve para reiniciar o laco; com sobreposicao (concurrency), um
+atraso de horas no cron nao abre buraco.
+
+MECANISMO DOS PRIMEIROS MINUTOS: a Zeus fecha um quadro por hora e ele chega
+por volta de hh:02. O laco acorda em :02, :12, :22, :32, :42 e :52. Nos
+primeiros 25 min da hora, se o quadro novo ainda nao apareceu, tenta de novo
+a cada 60 s ate ele chegar; so entao publica.
+
+--push: depois de cada publicacao faz git add/commit/push na pasta --saida.
 """
 
 from __future__ import annotations
@@ -25,10 +32,12 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+import traceback
+from datetime import datetime, timedelta, timezone
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 RAIZ = os.path.dirname(AQUI)
@@ -40,23 +49,132 @@ import estado as mod_estado  # noqa: E402
 import historico as mod_historico  # noqa: E402
 import zeus  # noqa: E402
 
+MINUTOS_DE_ACORDAR = (2, 12, 22, 32, 42, 52)
+
+
+def log(msg: str):
+    print(f"[{datetime.now(timezone.utc):%H:%M:%S} UTC] {msg}", flush=True)
+
 
 def quadro_mais_novo(est: dict) -> datetime | None:
     horas = []
     for f in est.get("fazendas", []):
         for s in f.get("estacoes", []):
-            h = (s.get("leitura") or {}).get("hora")
-            d = mod_estado._dt(h)
+            d = mod_estado._dt((s.get("leitura") or {}).get("hora"))
             if d:
                 horas.append(d)
     return max(horas) if horas else None
 
 
+class Robo:
+    def __init__(self, saida: str, email: str, senha: str, app_senha: str, push: bool):
+        self.saida = saida
+        self.app_senha = app_senha
+        self.push = push
+        os.makedirs(saida, exist_ok=True)
+        with open(os.path.join(RAIZ, "config.json"), encoding="utf-8") as f:
+            self.cfg = json.load(f)
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "historico.db")
+        enc = os.path.join(saida, "historico.db.enc")
+        if os.path.exists(enc):
+            try:
+                with open(enc, "rb") as f:
+                    open(self.db, "wb").write(cifra.decifrar(f.read(), app_senha))
+            except Exception as e:  # noqa: BLE001
+                log(f"AVISO: nao consegui abrir o historico publicado ({e}); comecando um novo")
+        self.historico = mod_historico.Historico(self.db)
+        self.cliente = zeus.ClienteZeus(email, senha, os.path.join(self.tmp, "sessao.json"))
+        self.cache = mod_estado.CachePrevisao()
+
+    def montar_esperando(self, esperar: bool, max_tentativas: int = 15) -> dict:
+        est = None
+        for tentativa in range(1, max_tentativas + 1):
+            est = mod_estado.montar(self.cfg, self.cliente, False, self.cache, self.historico)
+            agora = datetime.now(timezone.utc)
+            novo = quadro_mais_novo(est)
+            hora_atual = agora.replace(minute=0, second=0, microsecond=0)
+            log(f"tentativa {tentativa}: {est['total_estacoes']} estacoes, quadro mais novo "
+                f"{novo.isoformat() if novo else None}, avisos={len(est['avisos'])}")
+            if not esperar or est["total_estacoes"] == 0:
+                break
+            if novo is not None and novo >= hora_atual:
+                break  # o quadro desta hora ja chegou
+            if agora.minute >= 25:
+                log("passou dos 25 min da hora; publicando o que ha")
+                break
+            log("quadro da hora ainda nao fechou; esperando 60 s")
+            time.sleep(60)
+        return est
+
+    def escrever(self, est: dict):
+        with open(os.path.join(self.saida, "estado.enc"), "wb") as f:
+            f.write(cifra.cifrar(json.dumps(est, ensure_ascii=False).encode(), self.app_senha))
+        self.historico._con.commit()
+        with open(self.db, "rb") as f:
+            dados_db = f.read()
+        with open(os.path.join(self.saida, "historico.db.enc"), "wb") as f:
+            f.write(cifra.cifrar(dados_db, self.app_senha))
+        with open(os.path.join(self.saida, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"atualizado_em": est["atualizado_em"],
+                       "quadro": (quadro_mais_novo(est) or datetime.min).isoformat(),
+                       "fazendas": len(est["fazendas"]), "estacoes": est["total_estacoes"]}, f)
+        shutil.copyfile(os.path.join(RAIZ, "pagina.html"), os.path.join(self.saida, "index.html"))
+        with open(os.path.join(self.saida, ".nojekyll"), "w") as f:
+            f.write("")
+        log(f"publicado: {est['atualizado_em']} {est['resumo']}")
+        for a in est["avisos"][:10]:
+            log(f"  aviso: {a}")
+
+    def git_push(self):
+        if not self.push:
+            return
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.saida, capture_output=True, text=True)
+
+        git("add", "-A")
+        if git("diff", "--cached", "--quiet").returncode == 0:
+            log("git: nada mudou")
+            return
+        r = git("commit", "-q", "-m", f"atualiza {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC")
+        if r.returncode != 0:
+            log(f"git commit falhou: {r.stderr.strip()[:300]}")
+            return
+        for tentativa in range(3):
+            r = git("push", "-q")
+            if r.returncode == 0:
+                log("git: publicado no gh-pages")
+                return
+            log(f"git push falhou ({r.stderr.strip()[:200]}); tentando rebase")
+            git("pull", "--rebase", "-q")
+        log("git: desisti do push nesta rodada")
+
+    def rodar_uma_vez(self, esperar: bool):
+        try:
+            est = self.montar_esperando(esperar)
+            self.escrever(est)
+            self.git_push()
+        except Exception:  # noqa: BLE001
+            log("ERRO nesta rodada (o laco continua):")
+            traceback.print_exc()
+
+
+def proximo_despertar(agora: datetime) -> datetime:
+    base = agora.replace(second=0, microsecond=0)
+    for m in MINUTOS_DE_ACORDAR:
+        alvo = base.replace(minute=m)
+        if alvo > agora:
+            return alvo
+    return (base + timedelta(hours=1)).replace(minute=MINUTOS_DE_ACORDAR[0])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--saida", required=True)
-    ap.add_argument("--esperar-quadro", action="store_true")
-    ap.add_argument("--max-tentativas", type=int, default=15)
+    ap.add_argument("--laco", type=int, default=0, help="minutos de laco (0 = roda uma vez)")
+    ap.add_argument("--push", action="store_true", help="git add/commit/push apos cada publicacao")
+    ap.add_argument("--esperar-quadro", action="store_true", help="(modo uma vez) espera o quadro da hora")
     args = ap.parse_args()
 
     email, senha, app_senha = (os.environ.get(k, "") for k in ("ZEUS_EMAIL", "ZEUS_SENHA", "APP_SENHA"))
@@ -64,60 +182,24 @@ def main():
         print("Faltam ZEUS_EMAIL / ZEUS_SENHA / APP_SENHA no ambiente (segredos do GitHub).")
         sys.exit(1)
 
-    os.makedirs(args.saida, exist_ok=True)
-    with open(os.path.join(RAIZ, "config.json"), encoding="utf-8") as f:
-        cfg = json.load(f)
+    robo = Robo(args.saida, email, senha, app_senha, args.push)
+    if args.laco <= 0:
+        robo.rodar_uma_vez(args.esperar_quadro)
+        return
 
-    # historico: decifra o que esta publicado, usa, e cifra de volta no fim
-    tmp = tempfile.mkdtemp()
-    db = os.path.join(tmp, "historico.db")
-    enc = os.path.join(args.saida, "historico.db.enc")
-    if os.path.exists(enc):
-        try:
-            with open(enc, "rb") as f:
-                open(db, "wb").write(cifra.decifrar(f.read(), app_senha))
-        except Exception as e:  # noqa: BLE001
-            print(f"AVISO: nao consegui abrir o historico publicado ({e}); comecando um novo")
-    historico = mod_historico.Historico(db)
-    cliente = zeus.ClienteZeus(email, senha, os.path.join(tmp, "sessao.json"))
-    cache = mod_estado.CachePrevisao()
-
-    est = None
-    for tentativa in range(1, args.max_tentativas + 1):
-        est = mod_estado.montar(cfg, cliente, False, cache, historico)
+    fim = datetime.now(timezone.utc) + timedelta(minutes=args.laco)
+    log(f"laco ate {fim:%H:%M} UTC; publica em :{', :'.join(f'{m:02d}' for m in MINUTOS_DE_ACORDAR)}")
+    robo.rodar_uma_vez(esperar=datetime.now(timezone.utc).minute < 25)  # primeira, ja
+    while True:
         agora = datetime.now(timezone.utc)
-        novo = quadro_mais_novo(est)
-        hora_atual = agora.replace(minute=0, second=0, microsecond=0)
-        print(f"tentativa {tentativa}: {est['total_estacoes']} estacoes, quadro mais novo "
-              f"{novo.isoformat() if novo else None}, agora {agora:%H:%M} UTC, avisos={len(est['avisos'])}")
-        if not args.esperar_quadro or est["total_estacoes"] == 0:
+        alvo = proximo_despertar(agora)
+        if alvo >= fim:
+            log("fim do laco; a proxima execucao agendada assume")
             break
-        if novo is not None and novo >= hora_atual:
-            break  # o quadro desta hora ja chegou
-        if agora.minute >= 25:
-            print("passou dos 25 min da hora; publicando o que ha")
-            break
-        print("quadro da hora ainda nao fechou; esperando 60 s")
-        time.sleep(60)
-
-    # escreve a saida
-    with open(os.path.join(args.saida, "estado.enc"), "wb") as f:
-        f.write(cifra.cifrar(json.dumps(est, ensure_ascii=False).encode(), app_senha))
-    historico._con.commit()
-    with open(db, "rb") as f:
-        dados_db = f.read()
-    with open(enc, "wb") as f:
-        f.write(cifra.cifrar(dados_db, app_senha))
-    with open(os.path.join(args.saida, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump({"atualizado_em": est["atualizado_em"], "quadro": (quadro_mais_novo(est) or datetime.min).isoformat(),
-                   "fazendas": len(est["fazendas"]), "estacoes": est["total_estacoes"]}, f)
-    shutil.copyfile(os.path.join(RAIZ, "pagina.html"), os.path.join(args.saida, "index.html"))
-    with open(os.path.join(args.saida, ".nojekyll"), "w") as f:
-        f.write("")
-    shutil.rmtree(tmp, ignore_errors=True)
-    print("publicado:", est["atualizado_em"], est["resumo"])
-    for a in est["avisos"][:10]:
-        print("  aviso:", a)
+        espera = (alvo - agora).total_seconds()
+        log(f"proxima publicacao {alvo:%H:%M} UTC (em {espera / 60:.1f} min)")
+        time.sleep(max(1, espera))
+        robo.rodar_uma_vez(esperar=alvo.minute < 25)
 
 
 if __name__ == "__main__":

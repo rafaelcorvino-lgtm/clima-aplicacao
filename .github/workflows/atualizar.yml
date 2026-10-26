@@ -1,15 +1,17 @@
 name: Atualizar clima
 
-# A Zeus fecha um quadro por hora (chega por volta de hh:02). O GitHub costuma
-# atrasar a disparada agendada alguns minutos, por isso: varias disparadas por
-# hora, e o robo (--esperar-quadro) fica tentando a cada minuto nos primeiros
-# 25 min ate o quadro novo aparecer. As demais disparadas renovam a previsao.
+# O agendamento (cron) do GitHub e pouco confiavel: medido em 23 a 25/10/2026,
+# disparou ~7 vezes por dia em vez das 144 pedidas. Entao cada execucao fica
+# viva por quase 6 h (o maximo de um job) publicando a cada 10 min
+# (nuvem/atualizar.py --laco), e o cron so serve para REINICIAR o laco.
+# A cada 2 h uma execucao nova entra na fila (concurrency) e assume quando a
+# anterior termina: mesmo com horas de atraso no cron, nao abre buraco.
 #
 # Obs.: o GitHub so agenda workflows do ramo padrao (main). Se o agendamento
 # parar de disparar, um push neste arquivo no main reregistra o cron.
 on:
   schedule:
-    - cron: "2,6,11,17,30,45 * * * *"
+    - cron: "0 */2 * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,7 +24,7 @@ concurrency:
 jobs:
   atualizar:
     runs-on: ubuntu-latest
-    timeout-minutes: 28
+    timeout-minutes: 358
     steps:
       - name: Código
         uses: actions/checkout@v4
@@ -41,22 +43,26 @@ jobs:
       - name: Dependências
         run: pip install --quiet cryptography
 
-      - name: Buscar Zeus e previsão, cifrar e montar o site
-        env:
-          ZEUS_EMAIL: ${{ secrets.ZEUS_EMAIL }}
-          ZEUS_SENHA: ${{ secrets.ZEUS_SENHA }}
-          APP_SENHA: ${{ secrets.APP_SENHA }}
-        run: python nuvem/atualizar.py --saida site --esperar-quadro
-
-      - name: Publicar
+      - name: Identidade do robô no git
         run: |
           cd site
           git config user.name "clima-robo"
           git config user.email "clima-robo@users.noreply.github.com"
+
+      - name: Laço de 350 min buscando Zeus e previsão, cifrando e publicando
+        env:
+          ZEUS_EMAIL: ${{ secrets.ZEUS_EMAIL }}
+          ZEUS_SENHA: ${{ secrets.ZEUS_SENHA }}
+          APP_SENHA: ${{ secrets.APP_SENHA }}
+        run: python nuvem/atualizar.py --saida site --laco 350 --push
+
+      - name: Publicar o que sobrou (segurança)
+        if: always()
+        run: |
+          cd site
           git add -A
-          if git diff --cached --quiet; then
-            echo "nada mudou"
-          else
-            git commit -q -m "atualiza $(date -u +'%Y-%m-%d %H:%M') UTC"
-            git push
+          if git diff --cached --quiet; then echo "nada pendente"; else
+            git commit -q -m "atualiza $(date -u +'%Y-%m-%d %H:%M') UTC (final)"
+            git pull --rebase -q || true
+            git push -q
           fi
