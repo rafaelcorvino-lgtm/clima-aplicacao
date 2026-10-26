@@ -110,10 +110,16 @@ da página** (`nuvem/cifra.py`: PBKDF2 + AES-256-GCM) e publica no ramo
 no navegador com a senha; o código é público, os dados não.
 
 Mecanismo dos "primeiros minutos": a Zeus fecha o quadro às hh:00 e ele chega
-por volta de hh:02; o GitHub atrasa disparadas agendadas alguns minutos. Então
-o robô dispara em :02, :06, :11, :17, :30 e :45, e nos primeiros 25 minutos da
-hora fica tentando a cada 60 s até o quadro novo aparecer (`--esperar-quadro`).
-As disparadas de :30 e :45 só renovam a previsão.
+por volta de hh:02. O robô é um **laço**: cada execução fica viva por 350 min
+(quase o máximo de 6 h do GitHub) e publica em :02, :12, :22, :32, :42 e :52.
+Nos primeiros 25 minutos da hora, se o quadro novo ainda não apareceu, tenta
+a cada 60 s até ele chegar e só então publica. O agendamento (cron a cada 2 h)
+serve apenas para iniciar a execução seguinte, que entra na fila e assume
+quando a anterior termina.
+
+Por que laço: medido de 23 a 25/10/2026, o cron do GitHub disparou cerca de
+7 vezes por dia em vez das 144 pedidas (atrasa e pula). Com o laço, um atraso
+de horas no cron não abre buraco.
 
 Segredos (login Zeus e senha da página) ficam nos *secrets* do repositório,
 enviados UMA vez pelo dono com `ENVIAR-SEGREDOS-GITHUB.bat`. Para disparar na
