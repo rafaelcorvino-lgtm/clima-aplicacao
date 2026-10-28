@@ -336,11 +336,16 @@
 
   var ocupado = false;
   function carregarEstatico() {
-    var s = senhaGuardada();
-    if (!s) { pedirSenha(''); ocupado = false; return; }
-    fetch('estado.enc?t=' + Date.now(), {cache: 'no-store'})
-      .then(function (r) { if (!r.ok) throw new Error('estado.enc ' + r.status); return r.json(); })
-      .then(function (arq) { return decifrar(arq, s).then(render, function () { pedirSenha('Senha errada'); }); })
+    // Primeiro tenta os dados abertos (estado.json); se nao existirem, os cifrados (estado.enc + senha).
+    fetch('estado.json?t=' + Date.now(), {cache: 'no-store'})
+      .then(function (r) {
+        if (r.ok) return r.json().then(render);
+        var s = senhaGuardada();
+        if (!s) { pedirSenha(''); return; }
+        return fetch('estado.enc?t=' + Date.now(), {cache: 'no-store'})
+          .then(function (r2) { if (!r2.ok) throw new Error('estado.enc ' + r2.status); return r2.json(); })
+          .then(function (arq) { return decifrar(arq, s).then(render, function () { pedirSenha('Senha errada'); }); });
+      })
       .catch(function (e) { $('avisos').innerHTML = '<div class="aviso erro">Sem dados publicados ainda: ' + esc(e.message) + '</div>'; })
       .then(function () { ocupado = false; });
   }
