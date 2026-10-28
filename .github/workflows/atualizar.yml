@@ -54,6 +54,9 @@ jobs:
           ZEUS_EMAIL: ${{ secrets.ZEUS_EMAIL }}
           ZEUS_SENHA: ${{ secrets.ZEUS_SENHA }}
           APP_SENHA: ${{ secrets.APP_SENHA }}
+          # "1" = pagina aberta, sem senha (decisao do Rafael em 28/10/2026).
+          # Para voltar a pedir senha: troque para "0" e de push.
+          CLIMA_ABERTO: "1"
         run: python nuvem/atualizar.py --saida site --laco 350 --push
 
       - name: Publicar o que sobrou (segurança)

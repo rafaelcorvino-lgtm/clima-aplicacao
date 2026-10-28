@@ -67,17 +67,22 @@ def quadro_mais_novo(est: dict) -> datetime | None:
 
 
 class Robo:
-    def __init__(self, saida: str, email: str, senha: str, app_senha: str, push: bool):
+    def __init__(self, saida: str, email: str, senha: str, app_senha: str, push: bool, aberto: bool = False):
         self.saida = saida
         self.app_senha = app_senha
         self.push = push
+        self.aberto = aberto  # True = publica sem senha (estado.json e historico.db abertos)
         os.makedirs(saida, exist_ok=True)
         with open(os.path.join(RAIZ, "config.json"), encoding="utf-8") as f:
             self.cfg = json.load(f)
         self.tmp = tempfile.mkdtemp()
         self.db = os.path.join(self.tmp, "historico.db")
+        # historico publicado: aberto (historico.db) ou cifrado (historico.db.enc)
+        aberto_pub = os.path.join(saida, "historico.db")
         enc = os.path.join(saida, "historico.db.enc")
-        if os.path.exists(enc):
+        if os.path.exists(aberto_pub):
+            shutil.copyfile(aberto_pub, self.db)
+        elif os.path.exists(enc) and app_senha:
             try:
                 with open(enc, "rb") as f:
                     open(self.db, "wb").write(cifra.decifrar(f.read(), app_senha))
@@ -108,13 +113,30 @@ class Robo:
         return est
 
     def escrever(self, est: dict):
-        with open(os.path.join(self.saida, "estado.enc"), "wb") as f:
-            f.write(cifra.cifrar(json.dumps(est, ensure_ascii=False).encode(), self.app_senha))
         self.historico._con.commit()
         with open(self.db, "rb") as f:
             dados_db = f.read()
-        with open(os.path.join(self.saida, "historico.db.enc"), "wb") as f:
-            f.write(cifra.cifrar(dados_db, self.app_senha))
+        if self.aberto:
+            # Sem senha: estado.json e historico.db abertos; apaga as versoes cifradas.
+            with open(os.path.join(self.saida, "estado.json"), "w", encoding="utf-8") as f:
+                json.dump(est, f, ensure_ascii=False)
+            with open(os.path.join(self.saida, "historico.db"), "wb") as f:
+                f.write(dados_db)
+            for velho in ("estado.enc", "historico.db.enc"):
+                try:
+                    os.remove(os.path.join(self.saida, velho))
+                except FileNotFoundError:
+                    pass
+        else:
+            with open(os.path.join(self.saida, "estado.enc"), "wb") as f:
+                f.write(cifra.cifrar(json.dumps(est, ensure_ascii=False).encode(), self.app_senha))
+            with open(os.path.join(self.saida, "historico.db.enc"), "wb") as f:
+                f.write(cifra.cifrar(dados_db, self.app_senha))
+            for velho in ("estado.json", "historico.db"):
+                try:
+                    os.remove(os.path.join(self.saida, velho))
+                except FileNotFoundError:
+                    pass
         with open(os.path.join(self.saida, "meta.json"), "w", encoding="utf-8") as f:
             json.dump({"atualizado_em": est["atualizado_em"],
                        "quadro": (quadro_mais_novo(est) or datetime.min).isoformat(),
@@ -178,11 +200,16 @@ def main():
     args = ap.parse_args()
 
     email, senha, app_senha = (os.environ.get(k, "") for k in ("ZEUS_EMAIL", "ZEUS_SENHA", "APP_SENHA"))
-    if not email or not senha or not app_senha:
-        print("Faltam ZEUS_EMAIL / ZEUS_SENHA / APP_SENHA no ambiente (segredos do GitHub).")
+    aberto = os.environ.get("CLIMA_ABERTO", "") == "1"
+    if not email or not senha:
+        print("Faltam ZEUS_EMAIL / ZEUS_SENHA no ambiente (segredos do GitHub).")
         sys.exit(1)
+    if not aberto and not app_senha:
+        print("Falta APP_SENHA (ou defina CLIMA_ABERTO=1 para publicar sem senha).")
+        sys.exit(1)
+    log("modo: " + ("ABERTO, sem senha" if aberto else "cifrado com a senha da pagina"))
 
-    robo = Robo(args.saida, email, senha, app_senha, args.push)
+    robo = Robo(args.saida, email, senha, app_senha, args.push, aberto)
     if args.laco <= 0:
         robo.rodar_uma_vez(args.esperar_quadro)
         return

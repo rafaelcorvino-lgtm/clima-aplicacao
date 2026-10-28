@@ -103,11 +103,16 @@ Endereço: **https://rafaelcorvino-lgtm.github.io/clima-aplicacao/**
 
 Como funciona: esta pasta é o repositório público
 `rafaelcorvino-lgtm/clima-aplicacao`. Um robô (GitHub Actions,
-`.github/workflows/atualizar.yml`) roda várias vezes por hora, entra na Zeus,
-monta o estado com o mesmo `estado.py` do notebook, **cifra tudo com a senha
-da página** (`nuvem/cifra.py`: PBKDF2 + AES-256-GCM) e publica no ramo
-`gh-pages`: `estado.enc`, `historico.db.enc` e `index.html`. A página decifra
-no navegador com a senha; o código é público, os dados não.
+`.github/workflows/atualizar.yml`) entra na Zeus, monta o estado com o mesmo
+`estado.py` do notebook e publica no ramo `gh-pages`: `estado.json`,
+`historico.db` e `index.html`.
+
+**Desde 28/10/2026 a página é aberta, sem senha** (decisão do Rafael, para
+compartilhar o link com a equipe): `CLIMA_ABERTO: "1"` no workflow. Qualquer
+pessoa com o link vê os dados das fazendas. Para voltar a pedir senha, troque
+para `"0"` e dê push: o robô passa a publicar `estado.enc`/`historico.db.enc`
+cifrados com `APP_SENHA` (`nuvem/cifra.py`: PBKDF2 + AES-256-GCM) e a página
+decifra no navegador com a senha. A página aceita os dois modos sozinha.
 
 Mecanismo dos "primeiros minutos": a Zeus fecha o quadro às hh:00 e ele chega
 por volta de hh:02. O robô é um **laço**: cada execução fica viva por 350 min
