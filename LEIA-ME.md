@@ -137,6 +137,10 @@ Como funciona (`satelite.py`, só biblioteca padrão):
   PNGs, pivos.json); no robô do GitHub o cache mora em `site/satelite/`, então
   é publicado junto e sobrevive de uma execução para a outra.
 - Para desligar: `"satelite": {"ativo": false}` no `config.json`.
+- As imagens saem em grade latitude/longitude com os quatro limites no
+  `satelite.json`, e `/satelite/` é servido com CORS: o **MariAgro** (botão
+  Camada → "Sentinel") usa exatamente esses arquivos, do link público, como
+  fundo do mapa por fazenda.
 
 Teste na mão: `python aplicacao-aerea/satelite.py --fazenda Divina`.
 
