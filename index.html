@@ -73,6 +73,27 @@
   .linha .v b { color: var(--texto); font-weight: 600; }
   .linha .v.ruim b { color: #ff9a94; } .linha .v.atencao b { color: #ffd98a; }
 
+  /* Satelite (Sentinel-2): imagem da fazenda + NDVI por pivo */
+  .sat { padding: 8px 14px 12px; border-top: 1px solid var(--borda); }
+  .sat .tit { font-size: 13px; color: var(--fraco); display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .sat .tit b { color: var(--texto); }
+  .sat .modo { display: inline-flex; border: 1px solid var(--borda); border-radius: 999px; overflow: hidden; }
+  .sat .modo button { background: none; border: 0; color: var(--fraco); font-size: 12px; padding: 5px 12px; }
+  .sat .modo button.on { background: var(--borda); color: var(--texto); }
+  .sat .quadro { position: relative; width: 100%; border-radius: 10px; overflow: hidden; background: #000; }
+  .sat .quadro img, .sat .quadro svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .sat .quadro img[hidden] { display: none; }
+  .sat .quadro svg text { font: 700 11px system-ui, sans-serif; fill: #fff; paint-order: stroke; stroke: rgba(0,0,0,.65); stroke-width: 3px; text-anchor: middle; dominant-baseline: central; }
+  .sat .resumo-sat { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 4px; font-size: 12px; }
+  .sat .resumo-sat span { border-radius: 999px; padding: 2px 8px; border: 1px solid var(--borda); color: var(--fraco); }
+  .sat .resumo-sat b { color: var(--texto); }
+  .sat .pv { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 0 12px; margin-top: 4px; }
+  .sat .pv .linha { font-size: 13px; padding: 3px 0; }
+  .sat .pv .nd { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 34px; text-align: right; }
+  .sat .pv .cl { color: var(--fraco); font-size: 12px; white-space: nowrap; }
+  .sat .leg { color: var(--fraco); font-size: 11px; margin-top: 8px; line-height: 1.5; }
+  .sat .leg i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; margin-right: 3px; }
+
   .prev { padding: 8px 14px 12px; border-top: 1px solid var(--borda); }
   .prev .tit { font-size: 13px; color: var(--fraco); display: flex; justify-content: space-between; margin-bottom: 8px; }
   .prev .tit b { color: var(--texto); }
@@ -254,6 +275,55 @@
       '<div class="janela">' + jt + '</div><div class="barra">' + barra + '</div></div>';
   }
 
+  // Satelite: ultima cena Sentinel-2 limpa da fazenda e NDVI por pivo (satelite.py).
+  // A imagem NDVI so e baixada quando o botao e tocado; o modo escolhido fica
+  // guardado por fazenda para a tela nao voltar para "Foto" a cada atualizacao.
+  var MODO_SAT = {};
+  var CLASSE_TXT = {vigoroso: 'vigoroso', medio: 'médio', fraco: 'fraco', solo: 'solo exposto', nublado: 'sem cena limpa'};
+  var CORES_SAT = [['vigoroso', '#2e9e5b'], ['medio', '#8bc34a'], ['fraco', '#d9a21b'], ['solo', '#b08968'], ['nublado', '#8a8f99']];
+  function dataBR(d) { return d ? d.slice(8, 10) + '/' + d.slice(5, 7) : ''; }
+
+  function satelite(f) {
+    var s = f.satelite;
+    if (!s || (!(s.pivos || []).length && !(s.avisos || []).length)) return '';
+    var ndviOn = MODO_SAT[f.nome] === 'ndvi';
+    var cab = s.data ? 'imagem de <b>' + dataBR(s.data) + '</b>' + (s.dias != null ? ' (há ' + s.dias + ' dia' + (s.dias === 1 ? '' : 's') + ')' : '') : 'sem imagem';
+    var html = '<div class="sat" data-faz="' + esc(f.nome) + '"><div class="tit"><span><b>Satélite</b> Sentinel-2 · ' + cab + '</span>' +
+      (s.imagem ? '<span class="modo"><button data-modo="foto" class="' + (ndviOn ? '' : 'on') + '">Foto</button><button data-modo="ndvi" class="' + (ndviOn ? 'on' : '') + '">NDVI</button></span>' : '') + '</div>';
+    if (s.imagem) {
+      var im = s.imagem, q = '?c=' + encodeURIComponent(s.cena || '');
+      var fs = (im.largura / 28).toFixed(1), svg = '';  // ~12 px na tela, seja qual for a escala
+      (s.pivos || []).forEach(function (p) {
+        var m = im.marcas && im.marcas[p.nome];
+        if (!m) return;
+        var rot = (String(p.nome).match(/\d+/) || [String(p.nome).slice(0, 3)])[0];
+        svg += '<circle cx="' + m.x + '" cy="' + m.y + '" r="' + m.r + '" fill="none" stroke="' + p.cor + '" stroke-width="2" vector-effect="non-scaling-stroke"><title>' +
+          esc(p.nome) + (p.ndvi != null ? ': NDVI ' + fmt(p.ndvi, 2) : ': nublado') + '</title></circle>' +
+          '<text x="' + m.x + '" y="' + m.y + '" font-size="' + fs + '">' + esc(rot) + '</text>';
+      });
+      html += '<div class="quadro" style="aspect-ratio:' + im.largura + '/' + im.altura + '">' +
+        '<img class="foto" src="' + esc(im.foto) + q + '" alt="foto de satélite" loading="lazy"' + (ndviOn ? ' hidden' : '') + '>' +
+        '<img class="ndvi" ' + (ndviOn ? 'src' : 'data-src') + '="' + esc(im.ndvi) + q + '" alt="NDVI"' + (ndviOn ? '' : ' hidden') + '>' +
+        '<svg viewBox="0 0 ' + im.largura + ' ' + im.altura + '">' + svg + '</svg></div>';
+    }
+    var r = s.resumo || {};
+    var chips = CORES_SAT.filter(function (c) { return r[c[0]]; })
+      .map(function (c) { return '<span style="border-color:' + c[1] + '"><b>' + r[c[0]] + '</b> ' + CLASSE_TXT[c[0]] + '</span>'; }).join('');
+    if (chips) html += '<div class="resumo-sat">' + chips + '</div>';
+    var pv = '';
+    (s.pivos || []).forEach(function (p) {
+      var extra = p.ndvi == null ? 'nublado há 60 d' : CLASSE_TXT[p.classe] + (p.data && p.data !== s.data ? ' · ' + dataBR(p.data) : '');
+      pv += '<div class="linha"><span class="dot" style="background:' + p.cor + '"></span><span class="nm">' + esc(p.nome) + '</span>' +
+        '<span class="nd">' + (p.ndvi != null ? fmt(p.ndvi, 2) : '–') + '</span><span class="cl">' + esc(extra) + '</span></div>';
+    });
+    if (pv) html += '<div class="pv">' + pv + '</div>';
+    (s.avisos || []).forEach(function (a) { html += '<div class="aviso" style="margin-top:8px">' + esc(a) + '</div>'; });
+    html += '<div class="leg">NDVI médio do círculo, só pixels sem nuvem: <i style="background:#b08968"></i>abaixo de 0,20 solo exposto · ' +
+      '<i style="background:#d9a21b"></i>0,20 a 0,40 fraco · <i style="background:#8bc34a"></i>0,40 a 0,60 médio · <i style="background:#2e9e5b"></i>acima de 0,60 vigoroso. ' +
+      'Pivô nublado na imagem usa a cena limpa anterior (data ao lado). 10 m por pixel, passagem a cada 5 dias; pivôs vindos do mapa MariAgro.</div>';
+    return html + '</div>';
+  }
+
   function fazenda(f) {
     var nVento = (f.estacoes || []).filter(function (s) { return s.tem_vento; }).length;
     var sub = f.fonte === 'estacao' ? (nVento > 1 ? 'pior estação: ' : 'pela estação ') + esc(f.referencia || '') + (f.sem_vento ? ' (sem sensor de vento)' : '')
@@ -272,6 +342,7 @@
     }
     var comp = comparacao(f);
     if (comp) html += '<div class="prev">' + comp + '</div>';
+    html += satelite(f);
     html += previsaoZeus(f);
     html += previsao(f);
     return html + '</div>';
@@ -297,7 +368,9 @@
     $('rodape').innerHTML = 'Critério: temperatura até ' + fmt(LIM.temperatura_max) + ' °C · vento de ' + fmt(LIM.vento_min) + ' a ' +
       fmt(LIM.vento_max) + ' km/h · umidade acima de ' + fmt(LIM.umidade_min) + ' %.<br>' +
       'Estações Zeus Agrotech fecham um quadro por hora (vento = média da hora, inst = último instante). Previsão: Open-Meteo. Delta T calculado (Stull 2011).<br>' +
-      'Leitura de estação manda; a previsão só orienta. A decisão final é do piloto.';
+      'Leitura de estação manda; a previsão só orienta. A decisão final é do piloto.<br>' +
+      'Satélite: Sentinel-2 (ESA/Copernicus) pelo Earth Search (AWS), cena mais recente com o pivô sem nuvem' +
+      (d.satelite_atualizado_em ? '; conferido ' + horaBR(d.satelite_atualizado_em) : '') + '.';
   }
 
   // Senha da pagina: no link publico (Firebase) vai no cabecalho X-Senha e fica
@@ -364,6 +437,18 @@
       .catch(function (e) { if (e.message !== 'senha') $('avisos').innerHTML = '<div class="aviso erro">Sem resposta do servidor: ' + esc(e.message) + '</div>'; })
       .then(function () { ocupado = false; });
   }
+  // Foto <-> NDVI (um par de botoes por fazenda)
+  $('lista').addEventListener('click', function (e) {
+    var bt = e.target && e.target.closest ? e.target.closest('button[data-modo]') : null;
+    if (!bt) return;
+    var sat = bt.closest('.sat'), ndvi = sat.querySelector('img.ndvi'), foto = sat.querySelector('img.foto');
+    var modoNdvi = bt.getAttribute('data-modo') === 'ndvi';
+    if (modoNdvi && !ndvi.getAttribute('src')) ndvi.src = ndvi.getAttribute('data-src');
+    ndvi.hidden = !modoNdvi; foto.hidden = modoNdvi;
+    MODO_SAT[sat.getAttribute('data-faz')] = modoNdvi ? 'ndvi' : 'foto';
+    sat.querySelectorAll('button[data-modo]').forEach(function (b) { b.classList.toggle('on', b === bt); });
+  });
+
   carregar(false);
   setInterval(function () { carregar(false); }, 60000);
   document.addEventListener('visibilitychange', function () { if (!document.hidden) carregar(false); });
