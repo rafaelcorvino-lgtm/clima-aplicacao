@@ -2,6 +2,7 @@
 segredos.txt
 .sessao-zeus.json
 historico.db
+satelite/
 __pycache__/
 *.pyc
 site/

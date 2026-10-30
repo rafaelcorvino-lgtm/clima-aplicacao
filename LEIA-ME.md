@@ -52,6 +52,8 @@ causa) agora e em janelas de 3 h; a página mostra os dois.
   Só latitude e longitude saem daqui. Usada para "próxima janela" e para
   fazenda sem estação (aí a faixa diz "previsão").
 - **Delta T**: calculado da temperatura e umidade (bulbo úmido por Stull 2011).
+- **Satélite**: Sentinel-2 L2A pelo Earth Search / AWS (aberto, sem chave) e
+  pivôs do mapa MariAgro (Firebase, leitura pública). Ver a seção "Satélite".
 
 ## Como rodar
 
@@ -96,6 +98,51 @@ Primeira amostra (23/10/2026, 12:00): a previsão veio 2 a 4 °C mais quente e
 22 a 25 pontos mais seca que as estações em Divina, Serra Bonita e Três
 Marias (em Chapadão acertou a umidade e errou o vento em 12 km/h). Para
 umidade, a previsão NÃO substitui a estação.
+
+## Satélite: imagem Sentinel-2 e NDVI por pivô
+
+O Google Earth mostra a foto de 2023. O **Sentinel-2** (ESA/Copernicus) passa
+a cada 5 dias com 10 m por pixel: não se vê o pivô nítido, mas se vê o
+círculo verde ou seco, falha de irrigação e a evolução da cultura. Por fazenda,
+a página mostra a área dos pivôs na **cena limpa mais recente** (botão Foto /
+NDVI), com os círculos desenhados por cima, e uma lista com o **NDVI médio de
+cada pivô**:
+
+| NDVI | Classe |
+|---|---|
+| abaixo de 0,20 | solo exposto |
+| 0,20 a 0,40 | fraco |
+| 0,40 a 0,60 | médio |
+| acima de 0,60 | vigoroso |
+
+Como funciona (`satelite.py`, só biblioteca padrão):
+
+- **Pivôs**: do mapa MariAgro (Firebase, leitura pública), os círculos
+  desenhados lá como "pivô" (centro e raio), agrupados pelo nome da fazenda
+  do `config.json` ou pela fazenda mais próxima. Só aparece aqui o que foi
+  desenhado lá (em 30/10/2026: Larga 17, Divina 20, Serra Bonita 10, Três
+  Marias 21, Chapadão 1).
+- **Cenas**: catálogo STAC do Earth Search (Element 84) sobre o espelho
+  Sentinel-2 L2A da AWS, aberto, sem chave. Os GeoTIFF são "cloud optimized":
+  lê-se só os blocos de 1 km que cobrem a fazenda, com pedidos HTTP por faixa
+  de bytes; a cena inteira (100 km × 100 km) nunca é baixada.
+- **Nuvem**: pela máscara da própria cena (SCL, 20 m). Um pivô só recebe NDVI
+  de uma cena em que ele está pelo menos 80 % limpo; senão a busca volta no
+  tempo, pivô por pivô, até 60 dias. Pivô que ficou nublado 60 dias aparece
+  cinza. A imagem é a cena que serviu para mais pivôs; se um pivô veio de
+  outra data, a data aparece ao lado dele.
+- **Ritmo**: fio em segundo plano, a cada 3 h (`satelite.a_cada_h` no
+  config); só refaz quando o catálogo tem cena nova. A primeira vez leva
+  1 a 2 min por fazenda (alguns MB). Cache em `satelite/` (satelite.json,
+  PNGs, pivos.json); no robô do GitHub o cache mora em `site/satelite/`, então
+  é publicado junto e sobrevive de uma execução para a outra.
+- Para desligar: `"satelite": {"ativo": false}` no `config.json`.
+
+Teste na mão: `python aplicacao-aerea/satelite.py --fazenda Divina`.
+
+Primeira leitura (cena de 20/10/2026): Divina com 8 pivôs vigorosos (NDVI
+0,70 a 0,85), 3 fracos e 9 em solo exposto (0,12 a 0,17); Chapadão PV 08
+vigoroso (0,84).
 
 ## Link público pelo GitHub (gratuito, sem notebook ligado)
 
@@ -192,6 +239,7 @@ Para o app abrir sozinho quando o notebook ligar, rode uma vez
 | `zeus.py` | login Cognito (senha ou SRP) e chamadas `/pics`, `/pic-data/last-frame/{id}`, `/pics/alert/SPRAY_CURRENT` |
 | `previsao.py` | previsão horária Open-Meteo |
 | `regras.py` | avaliação bom/atenção/ruim e Delta T |
+| `satelite.py` | Sentinel-2: cena limpa por fazenda, NDVI por pivô, PNGs em `satelite/` |
 | `pagina.html` | a tela do celular, sem dependência externa |
 | `config.json` | limites, fazendas (coordenadas do mapa MariAgro), intervalo |
 | `segredos.txt` | credenciais (não vai para o git) |

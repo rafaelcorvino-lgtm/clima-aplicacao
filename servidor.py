@@ -9,6 +9,7 @@ funcao na nuvem (firebase/clima) tambem usa.
     GET /               pagina
     GET /api/estado     JSON com tudo
     GET /api/atualizar  forca uma atualizacao agora
+    GET /satelite/x.png imagens Sentinel-2 por fazenda (satelite.py)
     GET /health         sonda simples
 
 Uso:
@@ -28,6 +29,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -42,6 +44,7 @@ sys.path.insert(0, AQUI)
 
 import estado as mod_estado  # noqa: E402
 import historico as mod_historico  # noqa: E402
+import satelite as mod_satelite  # noqa: E402
 import zeus  # noqa: E402
 
 TZ_BR = mod_estado.TZ_BR
@@ -60,10 +63,16 @@ class Estado:
         self._lock = threading.Lock()
         self._cache = mod_estado.CachePrevisao()
         self.historico = mod_historico.Historico(os.path.join(AQUI, "historico.db"))
+        cfg_sat = carregar_config().get("satelite", {})
+        self.satelite = mod_satelite.Satelite(carregar_config(), a_cada_h=float(cfg_sat.get("a_cada_h", 3)))
+        self.satelite_ativo = bool(cfg_sat.get("ativo", True))
 
     def snapshot(self) -> dict:
         with self._lock:
-            return json.loads(json.dumps(self.dados))
+            d = json.loads(json.dumps(self.dados))
+        # O satelite anda em fio proprio e no seu proprio ritmo; entra no estado so na saida.
+        mod_satelite.aplicar(d, self.satelite.dados())
+        return d
 
     def atualizar(self):
         novo = mod_estado.montar(carregar_config(), self.cliente, self.simular, self._cache, self.historico)
@@ -113,7 +122,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", tipo)
         self.send_header("Content-Length", str(len(corpo)))
-        self.send_header("Cache-Control", "no-store")
+        if "Cache-Control" not in (extra or {}):
+            self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -147,6 +157,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._responder(b"", status=302, extra={"Location": "/login"})
         if caminho == "/":
             return self._responder(_html())
+        if caminho.startswith("/satelite/"):
+            # imagens Sentinel-2 geradas por satelite.py (so nomes simples, nada de caminho)
+            nome = os.path.basename(caminho)
+            arq = os.path.join(self.estado.satelite.pasta, nome)
+            if not re.fullmatch(r"[a-z0-9-]+\.png", nome) or not os.path.exists(arq):
+                return self._responder(b"nao encontrado", "text/plain", 404)
+            with open(arq, "rb") as f:
+                return self._responder(f.read(), "image/png", extra={"Cache-Control": "max-age=600"})
         if caminho == "/api/estado":
             return self._responder(json.dumps(self.estado.snapshot(), ensure_ascii=False).encode(),
                                    "application/json; charset=utf-8")
@@ -197,6 +215,19 @@ def laco_atualizacao(estado: Estado, minutos: float):
         time.sleep(max(60, minutos * 60))
 
 
+def laco_satelite(estado: Estado):
+    """Sentinel-2 em segundo plano: a primeira analise leva minutos (baixa alguns MB
+    por fazenda); depois so refaz quando o catalogo tem cena nova, a cada a_cada_h."""
+    while True:
+        try:
+            if estado.satelite.precisa():
+                d = estado.satelite.atualizar()
+                print(f"[{datetime.now(TZ_BR):%H:%M}] satelite: {len(d.get('fazendas', {}))} fazendas analisadas", flush=True)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+        time.sleep(600)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Clima de Aplicacao")
     ap.add_argument("--porta", type=int, default=8090)
@@ -221,6 +252,8 @@ def main():
 
     threading.Thread(target=laco_atualizacao, args=(estado, float(cfg.get("atualizar_a_cada_min", 5))),
                      daemon=True).start()
+    if estado.satelite_ativo:
+        threading.Thread(target=laco_satelite, args=(estado,), daemon=True).start()
     try:
         srv = Servidor((args.host, args.porta), Handler)
     except OSError as e:

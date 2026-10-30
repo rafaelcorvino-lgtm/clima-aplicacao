@@ -11,6 +11,8 @@ Na pasta --saida (o checkout do ramo gh-pages) escreve:
     estado.enc        o estado completo, cifrado com APP_SENHA
     historico.db.enc  o historico (SQLite) cifrado; e lido e reescrito a cada vez
     meta.json         so a hora da ultima atualizacao (sem dado sensivel)
+    satelite/         Sentinel-2 por fazenda (satelite.py): satelite.json + PNGs,
+                      sempre abertos (sao imagens publicas da ESA)
 
 POR QUE LACO: o agendamento (cron) do GitHub e pouco confiavel -- medido em
 23 a 25/10/2026, disparou ~7 vezes por dia em vez de 144. Entao uma execucao
@@ -35,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -47,6 +50,7 @@ sys.path.insert(0, AQUI)
 import cifra  # noqa: E402
 import estado as mod_estado  # noqa: E402
 import historico as mod_historico  # noqa: E402
+import satelite as mod_satelite  # noqa: E402
 import zeus  # noqa: E402
 
 MINUTOS_DE_ACORDAR = (2, 12, 22, 32, 42, 52)
@@ -91,6 +95,39 @@ class Robo:
         self.historico = mod_historico.Historico(self.db)
         self.cliente = zeus.ClienteZeus(email, senha, os.path.join(self.tmp, "sessao.json"))
         self.cache = mod_estado.CachePrevisao()
+        # Sentinel-2: o cache (satelite.json + PNGs) mora dentro do site publicado, entao
+        # sobrevive de uma execucao para a outra e so refaz quando ha cena nova.
+        cfg_sat = self.cfg.get("satelite", {})
+        self.satelite_ativo = bool(cfg_sat.get("ativo", True))
+        self.satelite = mod_satelite.Satelite(self.cfg, os.path.join(saida, "satelite"),
+                                              a_cada_h=float(cfg_sat.get("a_cada_h", 3)))
+        self._fio_satelite: threading.Thread | None = None
+
+    def satelite_em_segundo_plano(self, esperar: bool):
+        """Dispara a analise Sentinel-2 num fio proprio: ela leva minutos e nao pode
+        atrasar a publicacao do quadro. O resultado entra na proxima publicacao
+        (ou nesta, se 'esperar')."""
+        if not self.satelite_ativo:
+            return
+        if self._fio_satelite and self._fio_satelite.is_alive():
+            if esperar:
+                self._fio_satelite.join()
+            return
+        if not self.satelite.precisa():
+            return
+
+        def rodar():
+            try:
+                d = self.satelite.atualizar()
+                log(f"satelite: {len(d.get('fazendas', {}))} fazendas analisadas")
+            except Exception:  # noqa: BLE001
+                log("ERRO no satelite (o resto continua sem ele):")
+                traceback.print_exc()
+
+        self._fio_satelite = threading.Thread(target=rodar, daemon=True)
+        self._fio_satelite.start()
+        if esperar:
+            self._fio_satelite.join()
 
     def montar_esperando(self, esperar: bool, max_tentativas: int = 15) -> dict:
         est = None
@@ -172,9 +209,11 @@ class Robo:
             git("pull", "--rebase", "-q")
         log("git: desisti do push nesta rodada")
 
-    def rodar_uma_vez(self, esperar: bool):
+    def rodar_uma_vez(self, esperar: bool, esperar_satelite: bool = False):
         try:
             est = self.montar_esperando(esperar)
+            self.satelite_em_segundo_plano(esperar_satelite)
+            mod_satelite.aplicar(est, self.satelite.dados())
             self.escrever(est)
             self.git_push()
         except Exception:  # noqa: BLE001
@@ -211,7 +250,7 @@ def main():
 
     robo = Robo(args.saida, email, senha, app_senha, args.push, aberto)
     if args.laco <= 0:
-        robo.rodar_uma_vez(args.esperar_quadro)
+        robo.rodar_uma_vez(args.esperar_quadro, esperar_satelite=True)
         return
 
     fim = datetime.now(timezone.utc) + timedelta(minutes=args.laco)

@@ -18,6 +18,8 @@
   "_idade": "As estacoes Zeus fecham um quadro por hora; a leitura das 10:00 so chega perto das 10:10. Por isso 90 min.",
   "atualizar_a_cada_min": 5,
   "horas_de_previsao": 12,
+  "_satelite": "Sentinel-2 (satelite.py): ultima cena limpa e NDVI por pivo, pivos vindos do mapa MariAgro. Refaz a cada a_cada_h horas.",
+  "satelite": {"ativo": true, "a_cada_h": 3},
   "_fazendas": "Coordenadas vindas do mapa MariAgro. Uma estacao Zeus a menos de raio_km de uma fazenda e mostrada dentro dela.",
   "raio_km": 40,
   "fazendas": [
