@@ -158,13 +158,17 @@ class Handler(BaseHTTPRequestHandler):
         if caminho == "/":
             return self._responder(_html())
         if caminho.startswith("/satelite/"):
-            # imagens Sentinel-2 geradas por satelite.py (so nomes simples, nada de caminho)
+            # Imagens Sentinel-2 e o satelite.json gerados por satelite.py (so nomes simples,
+            # nada de caminho). Liberados para outros sites (CORS): o MariAgro usa como camada
+            # do mapa, e nada aqui e sensivel (imagens publicas da ESA e circulos dos pivos).
             nome = os.path.basename(caminho)
             arq = os.path.join(self.estado.satelite.pasta, nome)
-            if not re.fullmatch(r"[a-z0-9-]+\.png", nome) or not os.path.exists(arq):
+            if not re.fullmatch(r"[a-z0-9-]+\.(png|json)", nome) or not os.path.exists(arq):
                 return self._responder(b"nao encontrado", "text/plain", 404)
+            tipo = "image/png" if nome.endswith(".png") else "application/json; charset=utf-8"
             with open(arq, "rb") as f:
-                return self._responder(f.read(), "image/png", extra={"Cache-Control": "max-age=600"})
+                return self._responder(f.read(), tipo, extra={"Cache-Control": "max-age=600",
+                                                              "Access-Control-Allow-Origin": "*"})
         if caminho == "/api/estado":
             return self._responder(json.dumps(self.estado.snapshot(), ensure_ascii=False).encode(),
                                    "application/json; charset=utf-8")

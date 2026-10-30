@@ -486,74 +486,102 @@ def _png(largura: int, altura: int, rgb: bytes, filtro_sub: bool = False) -> byt
 
 
 def _imagens(cena: dict, pivos: list[dict], pasta: str, base: str) -> dict:
-    """Escreve <base>-foto.png e <base>-ndvi.png da area dos pivos; devolve a geometria."""
+    """Escreve <base>-foto.png e <base>-ndvi.png da area dos pivos; devolve a geometria.
+
+    A grade de saida e em latitude/longitude (pixels quadrados em metros no
+    centro da area), nao na UTM da cena: assim a imagem entra direto como
+    camada em qualquer mapa web (Leaflet/Google) so com os quatro limites,
+    sem girar nem distorcer. A reamostragem e por vizinho mais proximo.
+    """
     tci = Cog(cena["visual"])
     zona, sul = cena["zona"], cena["sul"]
-    xs, ys = [], []
-    for p in pivos:
-        e, n = para_utm(p["lat"], p["lng"], zona, sul)
-        xs += [e - p["raio"], e + p["raio"]]
-        ys += [n - p["raio"], n + p["raio"]]
-    c0, l1 = tci.pixel(min(xs) - MARGEM_M, min(ys) - MARGEM_M)
-    c1, l0 = tci.pixel(max(xs) + MARGEM_M, max(ys) + MARGEM_M)
+    m_lat = 111320.0
+    lat_c = sum(p["lat"] for p in pivos) / len(pivos)
+    m_lng = m_lat * math.cos(math.radians(lat_c))
+    sul_g = min(p["lat"] - (p["raio"] + MARGEM_M) / m_lat for p in pivos)
+    norte_g = max(p["lat"] + (p["raio"] + MARGEM_M) / m_lat for p in pivos)
+    oeste_g = min(p["lng"] - (p["raio"] + MARGEM_M) / m_lng for p in pivos)
+    leste_g = max(p["lng"] + (p["raio"] + MARGEM_M) / m_lng for p in pivos)
+    maior_m = max((norte_g - sul_g) * m_lat, (leste_g - oeste_g) * m_lng)
+    fator = max(1, -(-int(maior_m / 10) // MAX_PX))
+    res = 10.0 * fator                       # metros por pixel de saida
+    dlat, dlng = res / m_lat, res / m_lng
+    w, h = int(round((leste_g - oeste_g) / dlng)), int(round((norte_g - sul_g) / dlat))
+    leste_g, sul_g = oeste_g + w * dlng, norte_g - h * dlat   # fecha a caixa em pixels inteiros
+
+    # Janela da cena que cobre a caixa (os 4 cantos em UTM) e, por linha de saida, a
+    # posicao UTM dos dois extremos interpolada linearmente (a projecao e suave:
+    # o erro em 15 km fica abaixo de 1 m).
+    cantos = [para_utm(la, lo, zona, sul) for la in (sul_g, norte_g) for lo in (oeste_g, leste_g)]
+    c0, l1 = tci.pixel(min(c[0] for c in cantos) - 20, min(c[1] for c in cantos) - 20)
+    c1, l0 = tci.pixel(max(c[0] for c in cantos) + 20, max(c[1] for c in cantos) + 20)
     c0, l0, c1, l1 = int(c0), int(l0), int(c1) + 1, int(l1) + 1
-    fator = max(1, -(-max(c1 - c0, l1 - l0) // MAX_PX))
-    w, h = (c1 - c0) // fator, (l1 - l0) // fator
+    wl = c1 - c0
+
+    def indices():
+        """Para cada pixel de saida, o indice (linha*wl+coluna) na janela da cena, ou -1."""
+        saida = array("l")
+        for j in range(h):
+            la = norte_g - (j + 0.5) * dlat
+            ea, na = para_utm(la, oeste_g + 0.5 * dlng, zona, sul)
+            eb, nb = para_utm(la, leste_g - 0.5 * dlng, zona, sul)
+            de, dn = (eb - ea) / max(1, w - 1), (nb - na) / max(1, w - 1)
+            for i in range(w):
+                col, lin = tci.pixel(ea + de * i, na + dn * i)
+                col, lin = int(col) - c0, int(lin) - l0
+                saida.append(lin * wl + col if 0 <= col < wl and 0 <= lin < (l1 - l0) else -1)
+        return saida
+
+    idx = indices()
 
     # foto (TCI ja vem em RGB 8 bits)
-    jan = tci.ler(c0, l0, c0 + w * fator, l0 + h * fator)
-    wl = w * fator
+    jan = tci.ler(c0, l0, c1, l1)
     foto = bytearray()
-    for j in range(h):
-        linha = jan[(j * fator) * wl * 3:(j * fator + 1) * wl * 3]
-        if fator == 1:
-            foto += linha.tobytes()
-        else:
-            for i in range(w):
-                foto += linha[i * fator * 3:i * fator * 3 + 3].tobytes()
+    preto = bytes((0, 0, 0))
+    for k in idx:
+        foto += jan[k * 3:k * 3 + 3].tobytes() if k >= 0 else preto
     with open(os.path.join(pasta, base + "-foto.png"), "wb") as f:
         f.write(_png(w, h, bytes(foto), filtro_sub=True))
 
     # NDVI colorido, nuvem em cinza, sem dado em preto
     red, nir, scl = Cog(cena["red"]), Cog(cena["nir"]), Cog(cena["scl"])
-    jr = red.ler(c0, l0, c0 + w * fator, l0 + h * fator)
-    jn = nir.ler(c0, l0, c0 + w * fator, l0 + h * fator)
+    jr, jn = red.ler(c0, l0, c1, l1), nir.ler(c0, l0, c1, l1)
     sc0, sl0 = c0 // 2, l0 // 2
-    sw = -(-(c0 + w * fator) // 2) - sc0
-    js = scl.ler(sc0, sl0, sc0 + sw, -(-(l0 + h * fator) // 2))
+    sw = -(-c1 // 2) - sc0
+    js = scl.ler(sc0, sl0, sc0 + sw, -(-l1 // 2))
     off = cena["offset"]
     nd = bytearray()
-    cinza, preto = bytes((200, 200, 200)), bytes((0, 0, 0))
-    for j in range(h):
-        lin = j * fator
-        for i in range(w):
-            col = i * fator
-            s = js[((l0 + lin) // 2 - sl0) * sw + ((c0 + col) // 2 - sc0)]
-            if s == 0:
-                nd += preto
-                continue
-            if s not in SCL_LIMPO:
-                nd += cinza
-                continue
-            k = lin * wl + col
-            r, v = jr[k] - off, jn[k] - off
-            if r + v <= 0:
-                nd += preto
-                continue
-            x = (v - r) / (v + r)
-            nd += bytes(LUT_NDVI[int((max(-1.0, min(1.0, x)) + 1) * 100)])
+    cinza = bytes((200, 200, 200))
+    for k in idx:
+        if k < 0:
+            nd += preto
+            continue
+        lin, col = divmod(k, wl)
+        s = js[((l0 + lin) // 2 - sl0) * sw + ((c0 + col) // 2 - sc0)]
+        if s == 0:
+            nd += preto
+            continue
+        if s not in SCL_LIMPO:
+            nd += cinza
+            continue
+        r, v = jr[k] - off, jn[k] - off
+        if r + v <= 0:
+            nd += preto
+            continue
+        x = (v - r) / (v + r)
+        nd += bytes(LUT_NDVI[int((max(-1.0, min(1.0, x)) + 1) * 100)])
     with open(os.path.join(pasta, base + "-ndvi.png"), "wb") as f:
         f.write(_png(w, h, bytes(nd)))
 
     # posicao de cada pivo na imagem (para a pagina desenhar os circulos)
     marcas = {}
     for p in pivos:
-        e, n = para_utm(p["lat"], p["lng"], zona, sul)
-        cc, lc = tci.pixel(e, n)
-        marcas[p["nome"]] = {"x": round((cc - c0) / fator, 1), "y": round((lc - l0) / fator, 1),
-                             "r": round(p["raio"] / (10 * fator), 1)}
+        marcas[p["nome"]] = {"x": round((p["lng"] - oeste_g) / dlng, 1), "y": round((norte_g - p["lat"]) / dlat, 1),
+                             "r": round(p["raio"] / res, 1)}
     return {"foto": f"satelite/{base}-foto.png", "ndvi": f"satelite/{base}-ndvi.png",
-            "largura": w, "altura": h, "metros_por_pixel": 10 * fator, "marcas": marcas}
+            "largura": w, "altura": h, "metros_por_pixel": res, "grade": "latlng",
+            "limites": {"sul": round(sul_g, 6), "oeste": round(oeste_g, 6), "norte": round(norte_g, 6), "leste": round(leste_g, 6)},
+            "marcas": marcas}
 
 
 # ---------------------------------------------------------------------------
@@ -578,8 +606,7 @@ def analisar_fazenda(nome: str, pivos: list[dict], pasta: str, anterior: dict | 
     if not cenas:
         return {"pivos": [], "avisos": [f"nenhuma cena Sentinel-2 nos ultimos {DIAS_DE_BUSCA} dias"],
                 "analisado_em": datetime.now(TZ_BR).isoformat()}
-    if anterior and anterior.get("cena_mais_nova") == cenas[0]["id"] and anterior.get("imagem") \
-            and all(os.path.exists(os.path.join(pasta, os.path.basename(anterior["imagem"][k]))) for k in ("foto", "ndvi")):
+    if anterior and anterior.get("cena_mais_nova") == cenas[0]["id"] and _imagem_valida(anterior, pasta):
         return _recontar_dias(anterior, hoje)
 
     log(f"{nome}: {len(pivos)} pivos, {len(cenas)} cenas desde {cenas[-1]['data']}; cena mais nova {cenas[0]['data']}")
@@ -625,8 +652,7 @@ def analisar_fazenda(nome: str, pivos: list[dict], pasta: str, anterior: dict | 
         avisos.append(f"nenhum pivo ficou sem nuvem em {DIAS_DE_BUSCA} dias; a imagem e a menos nublada")
 
     imagem = None
-    if anterior and anterior.get("cena") == escolhida["id"] and anterior.get("imagem") \
-            and all(os.path.exists(os.path.join(pasta, os.path.basename(anterior["imagem"][k]))) for k in ("foto", "ndvi")) \
+    if anterior and anterior.get("cena") == escolhida["id"] and _imagem_valida(anterior, pasta) \
             and set(anterior["imagem"].get("marcas", {})) == {p["nome"] for p in pivos}:
         imagem = anterior["imagem"]
     else:
@@ -657,6 +683,13 @@ def analisar_fazenda(nome: str, pivos: list[dict], pasta: str, anterior: dict | 
         "analisado_em": datetime.now(TZ_BR).isoformat(), "avisos": avisos,
     }
     return _recontar_dias(saida, hoje)
+
+
+def _imagem_valida(anterior: dict, pasta: str) -> bool:
+    """A imagem guardada ainda serve: grade atual (lat/lng) e os dois PNGs no disco."""
+    im = anterior.get("imagem") or {}
+    return im.get("grade") == "latlng" and "limites" in im and \
+        all(os.path.exists(os.path.join(pasta, os.path.basename(im[k]))) for k in ("foto", "ndvi"))
 
 
 def _recontar_dias(s: dict, hoje) -> dict:
