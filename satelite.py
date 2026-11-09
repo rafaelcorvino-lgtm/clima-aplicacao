@@ -8,8 +8,9 @@ circulo verde ou seco, falha de irrigacao e a evolucao da cultura. E o NDVI
 
 De onde vem cada coisa (tudo aberto, sem chave e sem cadastro):
   - os PIVOS: do mapa MariAgro (Firebase, leitura publica) -- centro e raio
-    dos circulos desenhados por fazenda. So aparece aqui o que foi desenhado
-    la como "pivo".
+    dos circulos desenhados por fazenda. So recebe NDVI por pivo o que foi
+    desenhado la como "pivo"; a IMAGEM, porem, cobre TODAS as areas da
+    fazenda (pivos e talhoes), com 400 m de borda (versao 3, 09/11/2026).
   - as CENAS: catalogo STAC do Earth Search (Element 84) sobre o espelho
     Sentinel-2 L2A da AWS. Os arquivos sao GeoTIFF "cloud optimized":
     deflate em blocos de 1024 px. Com pedidos HTTP por faixa de bytes
@@ -57,14 +58,69 @@ STAC = "https://earth-search.aws.element84.com/v1/search"
 COLECAO = "sentinel-2-l2a"
 MAPA = "https://calendario-aerea-26140-default-rtdb.firebaseio.com/grupos/corvino-fazendas/areas.json"
 
+VERSAO_ANALISE = 3        # muda quando a regra de analise/imagem muda: refaz tudo que estiver em cache (3: caixa = todas as areas)
 DIAS_DE_BUSCA = 60        # ate onde voltar procurando cena limpa
+LIMPO_CAIXA_MIN = 0.90    # fracao da area da fazenda sem nuvem para a cena virar A IMAGEM
 MAX_CENAS = 40            # cenas examinadas por fazenda, no maximo
 LIMPO_MIN = 0.80          # fracao do pivo sem nuvem para aceitar a cena
-MARGEM_M = 400            # borda em volta dos pivos na imagem
-MAX_PX = 900              # maior lado da imagem publicada
+MARGEM_M = 400            # borda em volta das areas na imagem
+MAX_PX = 1600             # maior lado da imagem publicada (Serra Bonita tem ~25 km: fica em 20 m/pixel)
 TIMEOUT = 60
 TENTATIVAS = 3
 PASTA_PADRAO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "satelite")
+
+# Caixa de cada fazenda no mapa MariAgro: TODAS as areas desenhadas la (pivos E talhoes livres), nao so os
+# pivos -- a imagem publicada cobre essa caixa (+ MARGEM_M). Preenchida por pivos_do_mapa (extensao.json).
+# (Rafael, 09/11/2026: "o Sentinel nao pegou a fazenda inteira" -- Serra Bonita e quase toda talhao.)
+EXTENSAO: dict[str, dict] = {}
+M_LAT = 111320.0          # metros por grau de latitude
+
+
+def _caixa_da_area(a: dict):
+    """(sul, norte, oeste, leste) em graus de uma area do mapa (pivo = circulo; outra = contorno), ou None."""
+    if a.get("type") == "pivot":
+        c = a.get("centre") or []
+        if len(c) != 2 or not a.get("radius"):
+            return None
+        lat, lng, r = float(c[0]), float(c[1]), float(a["radius"])
+        m_lng = M_LAT * math.cos(math.radians(lat))
+        return (lat - r / M_LAT, lat + r / M_LAT, lng - r / m_lng, lng + r / m_lng)
+    pts = a.get("coords")
+    if isinstance(pts, dict):
+        pts = list(pts.values())
+    lats, lngs = [], []
+    for p in pts or []:
+        if isinstance(p, dict):
+            p = list(p.values())
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            try:
+                lats.append(float(p[0]))
+                lngs.append(float(p[1]))
+            except (TypeError, ValueError):
+                pass
+    if len(lats) < 3:
+        return None
+    return (min(lats), max(lats), min(lngs), max(lngs))
+
+
+def _caixa_fazenda(nome: str, pivos: list[dict]) -> dict | None:
+    """Caixa da imagem (graus): uniao da extensao de todas as areas e dos pivos, com MARGEM_M em volta."""
+    e = EXTENSAO.get(nome)
+    lats = ([e["sul"], e["norte"]] if e else []) + [p["lat"] - p["raio"] / M_LAT for p in pivos] + [p["lat"] + p["raio"] / M_LAT for p in pivos]
+    if not lats:
+        return None
+    lat_c = (min(lats) + max(lats)) / 2
+    m_lng = M_LAT * math.cos(math.radians(lat_c))
+    lngs = ([e["oeste"], e["leste"]] if e else []) + [p["lng"] - p["raio"] / m_lng for p in pivos] + [p["lng"] + p["raio"] / m_lng for p in pivos]
+    return {"sul": min(lats) - MARGEM_M / M_LAT, "norte": max(lats) + MARGEM_M / M_LAT,
+            "oeste": min(lngs) - MARGEM_M / m_lng, "leste": max(lngs) + MARGEM_M / m_lng}
+
+
+def _mesma_caixa(a: dict | None, b: dict | None, tol: float = 3e-4) -> bool:
+    """A caixa guardada (fechada na grade de pixels) ainda e a mesma, com folga de ~30 m."""
+    if not a or not b:
+        return False
+    return all(abs(float(a.get(k, 1e9)) - float(b[k])) <= tol for k in ("sul", "norte", "oeste", "leste"))
 
 # SCL (Scene Classification Layer): 0 sem dado, 1 saturado, 2 sombra escura,
 # 3 sombra de nuvem, 4 vegetacao, 5 solo, 6 agua, 7 nao classificado,
@@ -153,31 +209,42 @@ def pivos_do_mapa(cfg: dict, cache_arq: str | None = None, max_idade_h: float = 
     cache (pivos.json) e vale por 6 h; se o mapa nao responder, usa o cache
     que houver, de qualquer idade.
     """
-    if cache_arq and os.path.exists(cache_arq):
+    ext_arq = os.path.join(os.path.dirname(cache_arq), "extensao.json") if cache_arq else None
+
+    def _do_cache():
+        if ext_arq and os.path.exists(ext_arq):
+            try:
+                with open(ext_arq, encoding="utf-8") as f:
+                    EXTENSAO.update(json.load(f))
+            except (OSError, ValueError):
+                pass
+        with open(cache_arq, encoding="utf-8") as f:
+            return json.load(f)
+
+    if cache_arq and os.path.exists(cache_arq) and os.path.exists(ext_arq or ""):
         idade_h = (time.time() - os.path.getmtime(cache_arq)) / 3600
         if idade_h < max_idade_h:
-            with open(cache_arq, encoding="utf-8") as f:
-                return json.load(f)
+            return _do_cache()
     try:
         areas = json.loads(_http(MAPA).decode("utf-8"))
     except Exception as e:  # noqa: BLE001
         if cache_arq and os.path.exists(cache_arq):
             log(f"mapa MariAgro fora do ar ({e}); usando pivos.json antigo")
-            with open(cache_arq, encoding="utf-8") as f:
-                return json.load(f)
+            return _do_cache()
         raise
 
     fazendas = cfg.get("fazendas", [])
     raio_km = float(cfg.get("raio_km", 40))
     por_nome = {f["nome"].lower(): f["nome"] for f in fazendas}
     saida: dict[str, list[dict]] = {}
+    ext: dict[str, dict] = {}
     for a in (areas or {}).values():
-        if not isinstance(a, dict) or a.get("type") != "pivot":
+        if not isinstance(a, dict):
             continue
-        c = a.get("centre") or []
-        if len(c) != 2 or not a.get("radius"):
+        caixa = _caixa_da_area(a)
+        if not caixa:
             continue
-        lat, lng, raio = float(c[0]), float(c[1]), float(a["radius"])
+        lat, lng = (caixa[0] + caixa[1]) / 2, (caixa[2] + caixa[3]) / 2
         nome_faz = (((a.get("props") or {}).get("ident") or {}).get("fazenda") or "").strip()
         destino = por_nome.get(nome_faz.lower())
         if not destino and fazendas:
@@ -186,15 +253,25 @@ def pivos_do_mapa(cfg: dict, cache_arq: str | None = None, max_idade_h: float = 
                 destino = perto["nome"]
         if not destino:
             continue
-        saida.setdefault(destino, []).append({
-            "nome": (a.get("name") or "?").strip(), "lat": lat, "lng": lng, "raio": raio,
-        })
+        e = ext.setdefault(destino, {"sul": 90.0, "norte": -90.0, "oeste": 180.0, "leste": -180.0, "areas": 0})
+        e["sul"], e["norte"] = min(e["sul"], caixa[0]), max(e["norte"], caixa[1])
+        e["oeste"], e["leste"] = min(e["oeste"], caixa[2]), max(e["leste"], caixa[3])
+        e["areas"] += 1
+        saida.setdefault(destino, [])            # fazenda so com talhoes tambem ganha imagem
+        if a.get("type") == "pivot":
+            saida[destino].append({
+                "nome": (a.get("name") or "?").strip(), "lat": lat, "lng": lng, "raio": float(a["radius"]),
+            })
     for lista in saida.values():
         lista.sort(key=lambda p: (_numero(p["nome"]), p["nome"]))
+    EXTENSAO.clear()
+    EXTENSAO.update(ext)
     if cache_arq:
         os.makedirs(os.path.dirname(cache_arq), exist_ok=True)
         with open(cache_arq, "w", encoding="utf-8") as f:
             json.dump(saida, f, ensure_ascii=False, indent=1)
+        with open(ext_arq, "w", encoding="utf-8") as f:
+            json.dump(ext, f, ensure_ascii=False, indent=1)
     return saida
 
 
@@ -437,6 +514,28 @@ def _nuvem_no_pivo(scl: Cog, pivo: dict, cena: dict) -> tuple[float, bool]:
     return limpos / total, True
 
 
+def _limpo_na_caixa(scl: Cog, cena: dict, caixa: dict) -> float:
+    """Fracao sem nuvem da caixa da fazenda (SCL de 20 m, amostrada a cada 4 px).
+    Sem dado (fora da cena) conta como nao limpo: a imagem tem que cobrir a fazenda toda."""
+    zona, sul = cena["zona"], cena["sul"]
+    cols, lins = [], []
+    for la in (caixa["sul"], caixa["norte"]):
+        for lo in (caixa["oeste"], caixa["leste"]):
+            e, n = para_utm(la, lo, zona, sul)
+            c, l = scl.pixel(e, n)
+            cols.append(c)
+            lins.append(l)
+    c0, c1, l0, l1 = int(min(cols)), int(max(cols)) + 1, int(min(lins)), int(max(lins)) + 1
+    jan = scl.ler(c0, l0, c1, l1)
+    w = c1 - c0
+    limpos = total = 0
+    for lin in range(0, l1 - l0, 4):
+        for col in range(0, w, 4):
+            total += 1
+            limpos += jan[lin * w + col] in SCL_LIMPO
+    return limpos / total if total else 0.0
+
+
 def _ndvi_do_pivo(red: Cog, nir: Cog, scl: Cog, pivo: dict, cena: dict) -> dict:
     pts = list(_pixels_do_pivo(red, pivo, cena["zona"], cena["sul"], 10))
     c0, c1 = min(p[0] for p in pts), max(p[0] for p in pts) + 1
@@ -485,8 +584,8 @@ def _png(largura: int, altura: int, rgb: bytes, filtro_sub: bool = False) -> byt
             + pedaco(b"IDAT", zlib.compress(bruto, 6)) + pedaco(b"IEND", b""))
 
 
-def _imagens(cena: dict, pivos: list[dict], pasta: str, base: str) -> dict:
-    """Escreve <base>-foto.png e <base>-ndvi.png da area dos pivos; devolve a geometria.
+def _imagens(cena: dict, pivos: list[dict], pasta: str, base: str, caixa: dict) -> dict:
+    """Escreve <base>-foto.png e <base>-ndvi.png da caixa da fazenda (todas as areas); devolve a geometria.
 
     A grade de saida e em latitude/longitude (pixels quadrados em metros no
     centro da area), nao na UTM da cena: assim a imagem entra direto como
@@ -495,13 +594,10 @@ def _imagens(cena: dict, pivos: list[dict], pasta: str, base: str) -> dict:
     """
     tci = Cog(cena["visual"])
     zona, sul = cena["zona"], cena["sul"]
-    m_lat = 111320.0
-    lat_c = sum(p["lat"] for p in pivos) / len(pivos)
+    m_lat = M_LAT
+    sul_g, norte_g, oeste_g, leste_g = caixa["sul"], caixa["norte"], caixa["oeste"], caixa["leste"]
+    lat_c = (sul_g + norte_g) / 2
     m_lng = m_lat * math.cos(math.radians(lat_c))
-    sul_g = min(p["lat"] - (p["raio"] + MARGEM_M) / m_lat for p in pivos)
-    norte_g = max(p["lat"] + (p["raio"] + MARGEM_M) / m_lat for p in pivos)
-    oeste_g = min(p["lng"] - (p["raio"] + MARGEM_M) / m_lng for p in pivos)
-    leste_g = max(p["lng"] + (p["raio"] + MARGEM_M) / m_lng for p in pivos)
     maior_m = max((norte_g - sul_g) * m_lat, (leste_g - oeste_g) * m_lng)
     fator = max(1, -(-int(maior_m / 10) // MAX_PX))
     res = 10.0 * fator                       # metros por pixel de saida
@@ -581,6 +677,7 @@ def _imagens(cena: dict, pivos: list[dict], pasta: str, base: str) -> dict:
     return {"foto": f"satelite/{base}-foto.png", "ndvi": f"satelite/{base}-ndvi.png",
             "largura": w, "altura": h, "metros_por_pixel": res, "grade": "latlng",
             "limites": {"sul": round(sul_g, 6), "oeste": round(oeste_g, 6), "norte": round(norte_g, 6), "leste": round(leste_g, 6)},
+            "caixa_pedida": {k: round(caixa[k], 6) for k in ("sul", "norte", "oeste", "leste")},
             "marcas": marcas}
 
 
@@ -599,14 +696,18 @@ def analisar_fazenda(nome: str, pivos: list[dict], pasta: str, anterior: dict | 
     desde entao, ele volta como esta (so os 'dias' sao recontados).
     """
     base = slug(nome)
-    lats, lngs = [p["lat"] for p in pivos], [p["lng"] for p in pivos]
-    bbox = [min(lngs) - 0.01, min(lats) - 0.01, max(lngs) + 0.01, max(lats) + 0.01]
-    cenas = buscar_cenas(bbox)
+    caixa = _caixa_fazenda(nome, pivos)
     hoje = datetime.now(TZ_BR).date()
+    if not caixa:
+        return {"pivos": [], "avisos": ["fazenda sem areas desenhadas no mapa"],
+                "analisado_em": datetime.now(TZ_BR).isoformat()}
+    bbox = [caixa["oeste"] - 0.01, caixa["sul"] - 0.01, caixa["leste"] + 0.01, caixa["norte"] + 0.01]
+    cenas = buscar_cenas(bbox)
     if not cenas:
         return {"pivos": [], "avisos": [f"nenhuma cena Sentinel-2 nos ultimos {DIAS_DE_BUSCA} dias"],
                 "analisado_em": datetime.now(TZ_BR).isoformat()}
-    if anterior and anterior.get("cena_mais_nova") == cenas[0]["id"] and _imagem_valida(anterior, pasta):
+    if anterior and anterior.get("cena_mais_nova") == cenas[0]["id"] and anterior.get("versao") == VERSAO_ANALISE \
+            and _imagem_valida(anterior, pasta) and _mesma_caixa((anterior.get("imagem") or {}).get("caixa_pedida"), caixa):
         return _recontar_dias(anterior, hoje)
 
     log(f"{nome}: {len(pivos)} pivos, {len(cenas)} cenas desde {cenas[-1]['data']}; cena mais nova {cenas[0]['data']}")
@@ -643,22 +744,36 @@ def analisar_fazenda(nome: str, pivos: list[dict], pasta: str, anterior: dict | 
         if len(resultado) == len(pivos):
             break
 
-    # Imagem: a cena que serviu para mais pivos (empate: a mais nova). Se nenhuma
-    # serviu, a menos nublada entre as 10 mais novas -- para se ver o porque.
-    if aceitas:
+    # Imagem: a cena mais nova com a AREA INTEIRA da fazenda pelo menos 90 % sem nuvem
+    # (uma cena meio nublada serve para o NDVI dos pivos limpos, mas como fundo de mapa
+    # fica feia). Sem nenhuma assim, a que serviu para mais pivos (empate: a mais nova);
+    # sem nenhuma que serviu, a menos nublada entre as 10 mais novas.
+    escolhida = None
+    for cena in cenas[:15]:
+        if not all(_dentro(cena, la, lo) for la in (caixa["sul"], caixa["norte"]) for lo in (caixa["oeste"], caixa["leste"])):
+            continue
+        try:
+            if _limpo_na_caixa(cog(cena["scl"]), cena, caixa) >= LIMPO_CAIXA_MIN:
+                escolhida = cena
+                break
+        except Exception as e:  # noqa: BLE001
+            avisos.append(f"cena {cena['id']}: {e}")
+    if escolhida is None and aceitas:
         escolhida = max(cenas, key=lambda c: (aceitas.get(c["id"], 0), c["quando"]))
-    else:
+        avisos.append(f"nenhuma cena com a fazenda inteira limpa em {DIAS_DE_BUSCA} dias; a imagem tem nuvem")
+    if escolhida is None:
         escolhida = min(cenas[:10], key=lambda c: (c["nuvem"] if c["nuvem"] is not None else 101))
         avisos.append(f"nenhum pivo ficou sem nuvem em {DIAS_DE_BUSCA} dias; a imagem e a menos nublada")
 
     imagem = None
-    if anterior and anterior.get("cena") == escolhida["id"] and _imagem_valida(anterior, pasta) \
-            and set(anterior["imagem"].get("marcas", {})) == {p["nome"] for p in pivos}:
+    if anterior and anterior.get("cena") == escolhida["id"] and anterior.get("versao") == VERSAO_ANALISE \
+            and _imagem_valida(anterior, pasta) and set(anterior["imagem"].get("marcas", {})) == {p["nome"] for p in pivos} \
+            and _mesma_caixa(anterior["imagem"].get("caixa_pedida"), caixa):
         imagem = anterior["imagem"]
     else:
         try:
             os.makedirs(pasta, exist_ok=True)
-            imagem = _imagens(escolhida, pivos, pasta, base)
+            imagem = _imagens(escolhida, pivos, pasta, base, caixa)
         except Exception as e:  # noqa: BLE001
             avisos.append(f"imagem: {e}")
             log(f"{nome}: erro ao montar a imagem: {e}")
@@ -679,7 +794,7 @@ def analisar_fazenda(nome: str, pivos: list[dict], pasta: str, anterior: dict | 
     saida = {
         "cena": escolhida["id"], "data": escolhida["data"], "nuvem_cena": escolhida["nuvem"],
         "imagem": imagem, "pivos": lista, "resumo": resumo,
-        "cena_mais_nova": cenas[0]["id"], "data_mais_nova": cenas[0]["data"],
+        "cena_mais_nova": cenas[0]["id"], "data_mais_nova": cenas[0]["data"], "versao": VERSAO_ANALISE,
         "analisado_em": datetime.now(TZ_BR).isoformat(), "avisos": avisos,
     }
     return _recontar_dias(saida, hoje)
@@ -741,7 +856,7 @@ class Satelite:
                 pivos = json.load(f)
         except (OSError, ValueError):
             pivos = {}
-        if any(lista and nome not in self._dados.get("fazendas", {}) for nome, lista in pivos.items()):
+        if any(nome not in self._dados.get("fazendas", {}) for nome in pivos):
             return True
         try:
             return (datetime.now(TZ_BR) - datetime.fromisoformat(q)).total_seconds() >= self.a_cada_s
@@ -756,8 +871,6 @@ class Satelite:
         fazendas = self._dados.setdefault("fazendas", {})
         for nome, lista in pivos.items():
             if so and so.lower() not in nome.lower():
-                continue
-            if not lista:
                 continue
             t0 = time.time()
             try:

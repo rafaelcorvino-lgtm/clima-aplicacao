@@ -119,9 +119,15 @@ Como funciona (`satelite.py`, só biblioteca padrão):
 
 - **Pivôs**: do mapa MariAgro (Firebase, leitura pública), os círculos
   desenhados lá como "pivô" (centro e raio), agrupados pelo nome da fazenda
-  do `config.json` ou pela fazenda mais próxima. Só aparece aqui o que foi
-  desenhado lá (em 30/10/2026: Larga 17, Divina 20, Serra Bonita 10, Três
-  Marias 21, Chapadão 1).
+  do `config.json` ou pela fazenda mais próxima. O NDVI por pivô só sai para
+  o que foi desenhado lá como pivô (em 30/10/2026: Larga 17, Divina 20,
+  Serra Bonita 10, Três Marias 21, Chapadão 1).
+- **Caixa da imagem** (versão 3, 09/11/2026): envolve TODAS as áreas da
+  fazenda no mapa (pivôs e talhões livres) com 400 m de borda, guardada em
+  `satelite/extensao.json`. Antes só envolvia os pivôs e Serra Bonita
+  (quase toda talhão), Chapadão e Canaã ficavam de fora. Fazenda só com
+  talhões também ganha foto e NDVI (sem NDVI por pivô). Lado maior até
+  1600 px: Serra Bonita (25 km) sai a 20 m/pixel, as outras a 10 m.
 - **Cenas**: catálogo STAC do Earth Search (Element 84) sobre o espelho
   Sentinel-2 L2A da AWS, aberto, sem chave. Os GeoTIFF são "cloud optimized":
   lê-se só os blocos de 1 km que cobrem a fazenda, com pedidos HTTP por faixa
@@ -139,8 +145,8 @@ Como funciona (`satelite.py`, só biblioteca padrão):
 - Para desligar: `"satelite": {"ativo": false}` no `config.json`.
 - As imagens saem em grade latitude/longitude com os quatro limites no
   `satelite.json`, e `/satelite/` é servido com CORS: o **MariAgro** (botão
-  Camada → "Sentinel") usa exatamente esses arquivos, do link público, como
-  fundo do mapa por fazenda.
+  Camada → "Sentinel" e, desde a v.114, "NDVI") usa exatamente esses
+  arquivos, do link público, como fundo do mapa por fazenda.
 
 Teste na mão: `python aplicacao-aerea/satelite.py --fazenda Divina`.
 
