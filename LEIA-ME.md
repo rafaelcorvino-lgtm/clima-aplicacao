@@ -254,11 +254,33 @@ Para o app abrir sozinho quando o notebook ligar, rode uma vez
 | `config.json` | limites, fazendas (coordenadas do mapa MariAgro), intervalo |
 | `segredos.txt` | credenciais (não vai para o git) |
 
+## Robô Zeus → MariAgro (`nuvem/mariagro_zeus.py`)
+
+Robô à parte, com workflow próprio (`.github/workflows/mariagro-zeus.yml`):
+lê as estações direto da API da Zeus e grava em `grupos/corvino-fazendas/zeus`
+no banco do MariAgro (Firebase). O MariAgro (botão **Clima**, pinos no mapa e o
+chat "quanto choveu") lê dali. Não usa o `estado.json` nem publica nada neste
+repositório; só reaproveita `zeus.py`, `regras.py` e `config.json`.
+
+- Mora aqui porque este repositório é público (minutos de Actions ilimitados).
+  No repositório privado `mariagro` o mesmo laço de 24 h/dia gastou a cota de
+  2.000 min/mês em 2 dias (09 a 11/11/2026).
+- Por estação grava: última leitura horária, avaliação bom/atenção/ruim,
+  parecer e previsão da Zeus e a **chuva acumulada** (agora, hoje, ontem,
+  7 dias, 30 dias, desde `safra_inicio` do `config.json`, e mm de cada um dos
+  últimos 30 dias). Por fazenda do MariAgro (pelas áreas cadastradas no app):
+  estação de referência e média/máx/mín da chuva.
+- Histórico da Zeus:
+  `GET /reports/pic-data/gmt-3?ids=…&start=AAAA-MM-DD&end=AAAA-MM-DD&unit=HOURS|DAYS|TOTAL&reportViewEnum=PICS`
+  (várias estações numa chamada; `rain` em mm por período; `TOTAL` inclui o dia
+  final). `GET /pics/rain_now` dá a chuva da hora em curso.
+- Teste sem gravar: `python nuvem/mariagro_zeus.py --uma-vez --seco --salvar saida.json`.
+
 ## Pendências
 
-- Leitura mais fresca que o quadro horário: o portal tem um relatório
-  (`/reports/pic-data/gmt-3`) cujos parâmetros não foram descobertos; o
-  quadro de 60 min é o que o plano atual entrega.
+- Leitura mais fresca que o quadro horário: o relatório
+  `/reports/pic-data/gmt-3` (parâmetros acima) também só entrega quadros
+  fechados de 60 min; a hora em curso só tem a chuva (`/pics/rain_now`).
 - Expor na internet para o celular: atrás de Tailscale ou túnel, com
   `APP_SENHA` e `APP_HTTPS=1`.
 - Se as coordenadas de uma fazenda mudarem no MariAgro, atualizar

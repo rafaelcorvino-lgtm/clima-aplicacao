@@ -20,6 +20,8 @@
   "horas_de_previsao": 12,
   "_satelite": "Sentinel-2 (satelite.py): ultima cena limpa e NDVI por pivo, pivos vindos do mapa MariAgro. Refaz a cada a_cada_h horas.",
   "satelite": {"ativo": true, "a_cada_h": 3},
+  "_safra": "Usado só pelo robô nuvem/mariagro_zeus.py: início do ano agrícola (mês-dia) para o acumulado de chuva 'desde'.",
+  "safra_inicio": "09-01",
   "_fazendas": "Coordenadas vindas do mapa MariAgro. Uma estacao Zeus a menos de raio_km de uma fazenda e mostrada dentro dela.",
   "raio_km": 40,
   "fazendas": [

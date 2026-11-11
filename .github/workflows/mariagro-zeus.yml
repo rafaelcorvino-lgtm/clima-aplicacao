@@ -1,0 +1,43 @@
+name: Zeus → MariAgro
+
+# Robô à parte do "Atualizar clima": lê as estações direto da API da Zeus e grava em
+# grupos/corvino-fazendas/zeus no banco do MariAgro (nuvem/mariagro_zeus.py). Não publica
+# nada neste repositório nem mexe no site.
+#
+# Mora aqui porque este repositório é público (minutos de Actions ilimitados). No
+# repositório privado mariagro o mesmo laço gastou a cota de 2.000 min/mês em 2 dias
+# (09 a 11/11/2026).
+#
+# O cron do GitHub é pouco confiável, então cada execução fica viva ~6 h gravando a cada
+# 10 min e o cron só serve para REINICIAR o laço; a cada 2 h uma execução nova entra na
+# fila (concurrency) e assume quando a anterior termina.
+on:
+  schedule:
+    - cron: "37 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mariagro-zeus
+  cancel-in-progress: false
+
+jobs:
+  zeus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - name: Código
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Laço de 350 min lendo a Zeus e gravando no banco do MariAgro
+        env:
+          ZEUS_EMAIL: ${{ secrets.ZEUS_EMAIL }}
+          ZEUS_SENHA: ${{ secrets.ZEUS_SENHA }}
+        run: python nuvem/mariagro_zeus.py --laco 350 --intervalo 10
