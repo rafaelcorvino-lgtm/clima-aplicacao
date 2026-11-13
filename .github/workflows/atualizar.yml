@@ -9,6 +9,13 @@ name: Atualizar clima
 #
 # Obs.: o GitHub so agenda workflows do ramo padrao (main). Se o agendamento
 # parar de disparar, um push neste arquivo no main reregistra o cron.
+#
+# Medido em 11 a 13/11/2026: o cron disparou só 3 a 4 vezes por dia (não 12), e entre o
+# fim de uma execução e o disparo seguinte ficavam buracos de 1 a 4 h sem dado novo.
+# Por isso a última etapa ("Chamar a próxima execução") dispara a execução seguinte
+# assim que o laço termina. Ela só chama se a execução rodou pelo menos 50 min (falha
+# rápida não vira laço de falhas) e se não houver outra já esperando na fila. O cron
+# continua valendo como segunda garantia.
 on:
   schedule:
     - cron: "0 */2 * * *"
@@ -16,6 +23,7 @@ on:
 
 permissions:
   contents: write
+  actions: write   # para a última etapa chamar a próxima execução
 
 concurrency:
   group: atualizar-clima
@@ -26,6 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 358
     steps:
+      - name: Hora de início
+        run: echo "INICIO=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Código
         uses: actions/checkout@v4
 
@@ -69,3 +80,14 @@ jobs:
             git pull --rebase -q || true
             git push -q
           fi
+
+      - name: Chamar a próxima execução
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          decorrido=$(( $(date +%s) - INICIO ))
+          if [ "$decorrido" -lt 3000 ]; then echo "rodou só ${decorrido}s; não chamo a próxima"; exit 0; fi
+          fila=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow atualizar.yml --limit 20 --json status --jq '[.[] | select(.status=="queued" or .status=="pending" or .status=="waiting" or .status=="requested")] | length')
+          if [ "$fila" != "0" ]; then echo "já há $fila execução esperando na fila; ela assume"; exit 0; fi
+          gh workflow run atualizar.yml --repo "$GITHUB_REPOSITORY" --ref main
